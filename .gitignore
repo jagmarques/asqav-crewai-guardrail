@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+*.egg
+.ruff_cache/
+.mypy_cache/
+
+# AI session artefacts (local-only, never commit)
+.claude/
+.planning/
+.company/
+COMPANY.md
+CLAUDE.md
+.cursor/
+.gemini/
+.codex/
+.copilot/
+
+# Secrets
+.github_token
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
