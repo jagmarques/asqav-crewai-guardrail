@@ -50,18 +50,20 @@ def enable_guardrail(
         ) from err
 
     def _hook(context) -> bool | None:  # type: ignore[no-untyped-def]
-        request = GuardrailRequest(
-            tool_name=getattr(context, "tool_name", "") or "",
-            tool_input=dict(getattr(context, "tool_input", None) or {}),
-            agent_role=getattr(getattr(context, "agent", None), "role", None),
-            task_description=getattr(getattr(context, "task", None), "description", None),
-            crew_id=_crew_id(getattr(context, "crew", None)),
-        )
+        # Build and evaluate inside the try so ANY error here fails closed
+        # instead of escaping into crewAI's exception-swallowing dispatch.
         try:
+            request = GuardrailRequest(
+                tool_name=getattr(context, "tool_name", "") or "",
+                tool_input=_coerce_tool_input(getattr(context, "tool_input", None)),
+                agent_role=getattr(getattr(context, "agent", None), "role", None),
+                task_description=getattr(getattr(context, "task", None), "description", None),
+                crew_id=_crew_id(getattr(context, "crew", None)),
+            )
             decision = provider.evaluate(request)
         except Exception:
             logger.warning(
-                "guardrail provider %s raised; %s",
+                "guardrail %s could not authorize the call; %s",
                 getattr(provider, "name", "?"),
                 "blocking (hook fail-closed)" if fail_closed else "allowing (hook fail-open)",
             )
@@ -80,6 +82,20 @@ def enable_guardrail(
 
     register_before_tool_call_hook(_hook)
     return provider
+
+
+def _coerce_tool_input(raw: object) -> dict:
+    """Return a dict the guardrail can evaluate, never raising.
+
+    crewAI fills tool_input from json.loads of the model args, so a JSON scalar
+    or array can arrive. A dict passes through, None becomes empty, and anything
+    else is wrapped as ``{"input": value}`` so the provider sees it.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw is None:
+        return {}
+    return {"input": raw}
 
 
 def _crew_id(crew: object | None) -> str | None:

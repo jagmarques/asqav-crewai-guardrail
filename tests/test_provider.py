@@ -233,6 +233,50 @@ def test_enable_guardrail_hook_fail_open_on_provider_raise(fake_agent, fake_crew
     )
 
 
+# regression: crewAI fills tool_input from json.loads of the model args, so a
+# non-dict (JSON scalar/array) can arrive. The old hook coerced it with dict()
+# outside its fail-closed try, so the raise escaped and the tool ran unguarded.
+
+
+@pytest.mark.parametrize("bad_input", [5, "x", "rm -rf /", [1, 2], 3.14, True])
+def test_enable_guardrail_non_dict_tool_input_fails_closed(fake_agent, fake_crewai, bad_input):
+    provider = AsqavGuardrailProvider(denied_tools={"shell"})
+    enable_guardrail(provider, fail_closed=True)
+    hook = fake_crewai["hook"]
+
+    ctx = SimpleNamespace(
+        tool_name="shell",
+        tool_input=bad_input,
+        agent=None,
+        task=None,
+        crew=None,
+    )
+    # must reach the guardrail and block, never raise out of the hook
+    assert hook(ctx) is False
+
+
+def test_enable_guardrail_non_dict_tool_input_reaches_provider_as_dict(fake_agent, fake_crewai):
+    seen = {}
+
+    class RecordingProvider:
+        name = "rec"
+
+        def evaluate(self, request):
+            seen["tool_input"] = request.tool_input
+            return GuardrailDecision(allow=False, reason="deny")
+
+        def health_check(self):
+            return True
+
+    enable_guardrail(RecordingProvider(), fail_closed=True)
+    hook = fake_crewai["hook"]
+
+    ctx = SimpleNamespace(tool_name="wire", tool_input=[1, 2], agent=None, task=None, crew=None)
+    assert hook(ctx) is False
+    # the non-dict input reached the provider wrapped as a dict it can evaluate
+    assert seen["tool_input"] == {"input": [1, 2]}
+
+
 def test_enable_guardrail_without_crewai_raises(fake_agent, monkeypatch):
     # remove any faked crewai so the import genuinely fails
     import sys
