@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from .provider import GuardrailProvider, GuardrailRequest
+from .provider import GuardrailDecision, GuardrailProvider, GuardrailRequest
 
 logger = logging.getLogger("asqav")
 
@@ -61,7 +61,17 @@ def enable_guardrail(
                 crew_id=_crew_id(getattr(context, "crew", None)),
             )
             decision = provider.evaluate(request)
+            if not isinstance(decision, GuardrailDecision):
+                # A custom provider (the package's main extension point) that
+                # forgets a return, or returns a raw dict, must not read as an
+                # authorized allow. Raise so the fail-closed except below denies.
+                raise TypeError(
+                    f"{getattr(provider, 'name', '?')}.evaluate() returned "
+                    f"{type(decision).__name__}, expected GuardrailDecision"
+                )
         except Exception:
+            # No signed receipt on this path: asqav is unreachable or the
+            # provider is broken, so there is nothing to sign. Still deny.
             logger.warning(
                 "guardrail %s could not authorize the call; %s",
                 getattr(provider, "name", "?"),

@@ -277,6 +277,29 @@ def test_enable_guardrail_non_dict_tool_input_reaches_provider_as_dict(fake_agen
     assert seen["tool_input"] == {"input": [1, 2]}
 
 
+# regression: a provider whose evaluate() returns something that is not a
+# GuardrailDecision (a forgotten return in a custom provider, the package's
+# main extension point) must fail closed, not escape via decision.allow.
+
+
+@pytest.mark.parametrize("bad_decision", [None, {"allow": False}])
+def test_enable_guardrail_non_decision_return_fails_closed(fake_agent, fake_crewai, bad_decision):
+    class MisbehavingProvider:
+        name = "misbehaving"
+
+        def evaluate(self, request):
+            return bad_decision
+
+        def health_check(self):
+            return True
+
+    enable_guardrail(MisbehavingProvider(), fail_closed=True)
+    hook = fake_crewai["hook"]
+
+    ctx = SimpleNamespace(tool_name="x", tool_input={}, agent=None, task=None, crew=None)
+    assert hook(ctx) is False
+
+
 def test_enable_guardrail_without_crewai_raises(fake_agent, monkeypatch):
     # remove any faked crewai so the import genuinely fails
     import sys
