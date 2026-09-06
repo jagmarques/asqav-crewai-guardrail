@@ -14,6 +14,7 @@ crewAI is missing.
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 
 from .provider import GuardrailDecision, GuardrailProvider, GuardrailRequest
 
@@ -38,16 +39,25 @@ def enable_guardrail(
         provider: Any object implementing the GuardrailProvider protocol.
         fail_closed: Hook-level fail-closed on an unexpected provider error.
 
+    Call once during serial setup, before other before-tool hooks. Existing
+    hooks cause a RuntimeError and remain unchanged. Keep the guard registered;
+    later hooks must preserve authorization-relevant inputs.
+
     Returns:
         The same provider, for chaining.
     """
     try:
-        from crewai.hooks import register_before_tool_call_hook
+        from crewai.hooks import get_before_tool_call_hooks, register_before_tool_call_hook
     except ImportError as err:
         raise ImportError(
-            "enable_guardrail requires crewai. "
-            "Install with: pip install 'asqav-crewai-guardrail[crewai]'"
+            "enable_guardrail requires crewai. Install with: pip install 'crewai>=1.9.1,<2'"
         ) from err
+
+    if get_before_tool_call_hooks():
+        raise RuntimeError(
+            "enable_guardrail must run once, before other before-tool hooks, "
+            "during serial application setup"
+        )
 
     def _hook(context) -> bool | None:  # type: ignore[no-untyped-def]
         # Build and evaluate inside the try so ANY error here fails closed
@@ -69,24 +79,27 @@ def enable_guardrail(
                     f"{getattr(provider, 'name', '?')}.evaluate() returned "
                     f"{type(decision).__name__}, expected GuardrailDecision"
                 )
+            allowed = bool(decision.allow)
         except Exception:
             # No signed receipt on this path: asqav is unreachable or the
             # provider is broken, so there is nothing to sign. Still deny.
-            logger.warning(
-                "guardrail %s could not authorize the call; %s",
-                getattr(provider, "name", "?"),
-                "blocking (hook fail-closed)" if fail_closed else "allowing (hook fail-open)",
-            )
+            with suppress(Exception):
+                logger.warning(
+                    "guardrail %s could not authorize the call; %s",
+                    getattr(provider, "name", "?"),
+                    "blocking (hook fail-closed)" if fail_closed else "allowing (hook fail-open)",
+                )
             if fail_closed:
                 return False
             return None
-        if not decision.allow:
-            logger.info(
-                "guardrail %s blocked tool %s: %s",
-                getattr(provider, "name", "?"),
-                request.tool_name,
-                decision.reason,
-            )
+        if not allowed:
+            with suppress(Exception):
+                logger.info(
+                    "guardrail %s blocked tool %s: %s",
+                    getattr(provider, "name", "?"),
+                    request.tool_name,
+                    decision.reason,
+                )
             return False
         return None
 
