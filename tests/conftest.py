@@ -6,9 +6,14 @@ real API key. Each test gets a fresh fake agent whose ``sign`` is a mock.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from unittest.mock import MagicMock
+
+os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+os.environ["CREWAI_TRACING_ENABLED"] = "false"
+os.environ["OTEL_SDK_DISABLED"] = "true"
 
 import asqav.client
 import pytest
@@ -51,6 +56,7 @@ def fake_crewai(monkeypatch):
 
     hooks_mod = types.ModuleType("crewai.hooks")
     hooks_mod.register_before_tool_call_hook = fake_register
+    hooks_mod.get_before_tool_call_hooks = lambda: [recorder["hook"]] if recorder["hook"] else []
     crewai_mod = types.ModuleType("crewai")
     crewai_mod.hooks = hooks_mod
 

@@ -1,19 +1,9 @@
-"""crewAI GuardrailProvider backed by asqav.
-
-Implements the GuardrailProvider protocol proposed in crewAI #4877
-(evaluate + health_check). On every evaluate() the provider records the
-authorization decision as an asqav receipt (the pre-dispatch authorization
-receipt) and returns the verdict plus the receipt id in the decision metadata.
-
-This is distinct from ``asqav-crewai``: that package signs tool:start / tool:end
-events for audit (fail-open by default). This package is an authorization gate
-that blocks or allows the call and produces a receipt for the verdict itself
-(fail-closed by default).
-"""
+"""Evaluate local tool policy and request Asqav signing for its decision."""
 
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -41,8 +31,7 @@ _DEFAULT_ALLOW_REASON = "default-allow"
 class GuardrailRequest:
     """Context passed to the provider for each tool call.
 
-    Mirrors the contract proposed in crewAI #4877 so this package stays a
-    drop-in once the protocol lands in crewAI core.
+    The adapter constructs this package-owned request from a CrewAI hook context.
     """
 
     tool_name: str
@@ -55,7 +44,7 @@ class GuardrailRequest:
 
 @dataclass
 class GuardrailDecision:
-    """Provider allow/deny verdict plus the asqav receipt for it."""
+    """Provider allow/deny verdict with optional receipt metadata."""
 
     allow: bool
     reason: str | None = None
@@ -83,18 +72,14 @@ PolicyFn = Callable[[GuardrailRequest], "tuple[bool, str]"]
 
 
 class AsqavGuardrailProvider(AsqavAdapter):
-    """GuardrailProvider that records every authorization as an asqav receipt.
+    """Evaluate tool requests and attempt to sign the resulting decisions.
 
-    The provider computes an allow/deny verdict (via a pluggable ``policy``
-    callback, a ``denied_tools`` set, or a default allow-all) and then signs
-    that verdict through asqav. The receipt travels with the action, so the
-    question "who authorized this tool call and when?" is always answerable
-    from a tamper-evident record, for both the allow path and the deny path.
+    A successful signing request adds its receipt identifier to the decision.
+    Signing failure and observation mode can produce a decision without one.
 
     Args:
         policy: Optional callable ``(request) -> (allow, reason)``. Use this to
-            slot in SINT, a YAML rules engine, a denylist with logic, or any
-            custom decision function. When omitted, the provider allows all
+            supply a custom decision function. When omitted, the provider allows all
             calls (audit mode); combine with ``denied_tools`` for a simple
             blocklist.
         denied_tools: Optional set of tool names to always deny. Applied before
@@ -105,11 +90,6 @@ class AsqavGuardrailProvider(AsqavAdapter):
         api_key / agent_name / agent_id / observe: Forwarded to the asqav
             adapter base (see ``asqav-crewai``).
 
-    The ``escalate`` tri-state from the #4877 discussion is expressed as
-    ``allow=False`` with a reason of "awaiting approval". The eventual human
-    approval is recorded as a second receipt countersigned onto this one
-    (``Agent.countersign``), so the suspend/resolve lifecycle composes without
-    new SDK surface.
     """
 
     name = "asqav"
@@ -138,7 +118,7 @@ class AsqavGuardrailProvider(AsqavAdapter):
         return True, _DEFAULT_ALLOW_REASON
 
     def evaluate(self, request: GuardrailRequest) -> GuardrailDecision:
-        """Authorize a tool call and record the verdict as an asqav receipt."""
+        """Evaluate a tool request and attempt to record its verdict through Asqav."""
         allow, reason = self._decide(request)
         policy_decision = "permit" if allow else "deny"
 
@@ -166,20 +146,22 @@ class AsqavGuardrailProvider(AsqavAdapter):
                 # asqav is the evidence layer. If it is unreachable we cannot
                 # produce a receipt for this decision. Fail closed by default:
                 # deny the call rather than act without a record.
-                logger.warning("asqav authorize receipt failed: %s", exc)
+                with suppress(Exception):
+                    logger.warning("asqav authorize receipt failed: %s", exc)
                 if self._fail_closed:
                     return GuardrailDecision(
                         allow=False,
-                        reason=f"asqav unreachable: {exc}",
+                        reason="asqav signing failed",
                         metadata={"fail_closed": True, "policy_decision": policy_decision},
                     )
         else:
-            logger.info(
-                "OBSERVE: would sign %s verdict=%s tool=%s",
-                self._action_type,
-                policy_decision,
-                request.tool_name,
-            )
+            with suppress(Exception):
+                logger.info(
+                    "OBSERVE: would sign %s verdict=%s tool=%s",
+                    self._action_type,
+                    policy_decision,
+                    request.tool_name,
+                )
 
         return GuardrailDecision(
             allow=allow,
